@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+*.egg-info/
+
+# Playwright state / auth cookies
+auth_state.json
+playwright/.auth/
+
+# Chrome profile managed externally – not committed
+# (set path in .env)
