@@ -1,7 +1,6 @@
-"""JoySpace document-level operations (read, create, insert content)."""
-from __future__ import annotations
+"""Document package — 对外暴露核心 API。"""
+from joyspace_operator.document.navigator import open_doc
+from joyspace_operator.document.writer import DocumentWriter
+from joyspace_operator.document.reader import read_doc, blocks_to_markdown, Block
 
-# Sub-modules will be added here as we implement each capability:
-#   reader.py   – read / parse document content
-#   writer.py   – insert text, tables, attachments
-#   navigator.py – open / locate documents
+__all__ = ["open_doc", "DocumentWriter", "read_doc", "blocks_to_markdown", "Block"]

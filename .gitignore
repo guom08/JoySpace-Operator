@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 dist/
 *.egg-info/
+joyspace_operator.egg-info/
 
 # Playwright state / auth cookies
 auth_state.json
