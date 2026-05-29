@@ -15,7 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Page
 
-from joyspace_operator.browser import launch_persistent_context, get_page
+from joyspace_operator.browser import launch_persistent_context, get_page, wait_for_login
 from joyspace_operator.document import open_doc, DocumentWriter
 from joyspace_operator.utils import get_logger
 
@@ -39,32 +39,34 @@ async def shot(page: Page, label: str) -> None:
 
 
 async def write_title(page: Page, text: str) -> None:
-    """将文字写入标题栏（.page-title-below），不触碰正文编辑区。
-    直接点击标题栏、清空、输入——不需要斜杠命令，标题栏会自动格式化。
+    """将文字写入文档标题（slate editor 第一个块）。
+    JoySpace 的标题不是独立 input，而是 slate-editor 的第一个段落块（高度约 44px）。
     """
-    # 用 locator force=True 确保点到标题栏，绕过任何遮挡层
-    title_loc = page.locator(".page-title-below").first
-    try:
-        await title_loc.click(force=True, timeout=3000)
-    except Exception:
-        # 备用：坐标点击
-        coords = await page.evaluate("""() => {
-            const el = document.querySelector('.page-title-below');
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            return {x: Math.round(r.x + r.width * 0.15),
-                    y: Math.round(r.y + r.height / 2)};
-        }""")
-        if coords:
-            await page.mouse.click(coords["x"], coords["y"])
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(400)
+    coords = await page.evaluate("""() => {
+        const ed = document.querySelector(
+            '.page-main-content .slate-editor.use-virtual-caret');
+        if (!ed) return null;
+        const first = ed.querySelector('[data-slate-node="element"]');
+        if (!first) return null;
+        const r = first.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0)
+            return {x: Math.round(r.x + 80), y: Math.round(r.y + r.height / 2)};
+        return null;
+    }""")
+    if not coords:
+        log.warning("找不到标题块，跳过")
+        return
+    log.info("标题块坐标 (%d, %d)", coords["x"], coords["y"])
+    await page.mouse.click(coords["x"], coords["y"])
     await page.wait_for_timeout(300)
-
-    # 清空现有标题，直接输入新标题
+    # 全选当前块内容再覆写（防止残留内容）
     await page.keyboard.press("Meta+a")
     await page.wait_for_timeout(150)
     await page.keyboard.type(text, delay=12)
     await page.wait_for_timeout(300)
-    log.info("标题栏写入: %s", text[:60])
+    log.info("标题写入: %s", text[:60])
 
 
 async def focus_body(page: Page) -> None:
@@ -210,9 +212,20 @@ async def main() -> None:
         page = await get_page(ctx)
 
         await open_doc(page, DOC_URL)
+        # 确认登录状态
+        await wait_for_login(page)
+        # 关闭打开文档后可能弹出的任何卡片/弹窗（如身份信息卡片）
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(300)
+        # 把鼠标移到编辑区中部的安全位置，远离顶部作者信息区
+        await page.mouse.move(600, 500)
+        await page.wait_for_timeout(200)
         await shot(page, "opened")
 
         w = DocumentWriter(page)
+
+        # 0. 设置文档字体
+        await w.set_page_font("京东朗正体")
 
         # 1. 清空正文
         await w.clear()
