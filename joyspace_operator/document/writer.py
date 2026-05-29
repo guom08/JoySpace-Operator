@@ -52,11 +52,15 @@ class DocumentWriter:
         """
         await self.page.wait_for_timeout(500)  # 等页面头部完全渲染
 
-        # 检查是否已设置（按钮可能显示当前字体名，不再显示"字体"）
+        # 检查是否已设置（按钮显示完整名或缩写，如「京东朗正体」→「朗正」）
+        font_fragments = [font_name] + [font_name[i:i+2] for i in range(0, len(font_name)-1)]
+        already_js = "(" + " || ".join(
+            f"txt.includes('{f}')" for f in font_fragments
+        ) + ")"
         already = await self.page.evaluate(f"""() => {{
             for (const el of document.querySelectorAll('*')) {{
                 const txt = (el.textContent || '').trim();
-                if (!txt.includes('{font_name}')) continue;
+                if (!({already_js})) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width > 0 && r.y >= 0 && r.y < 200) return true;
             }}
@@ -177,12 +181,16 @@ class DocumentWriter:
             log.warning("clear() 未能完全清空，剩余字数: %d", final_wc)
 
     async def set_title(self, title: str = "") -> None:
-        """设置文档标题栏（Slate 编辑区外的 page-title 输入框）。
+        """设置文档标题栏。
 
-        传空字符串时清空标题，页面显示为"无标题"占位符。
-        每次写新文档前应先调用此方法，避免残留旧标题。
+        传空字符串时清空标题。每次写新文档前应先调用此方法，避免残留旧标题。
+
+        JoySpace 有两种标题结构：
+        1. 独立 contenteditable input（已有内容的旧文档）
+        2. Slate 内嵌首行标题（show-title 模式，新建空文档）
+        两种都能处理。
         """
-        # 找标题输入框：JoySpace 标题区是独立的 contenteditable div
+        # 路径 A：找独立的 contenteditable 标题输入框
         coords = await self.page.evaluate("""() => {
             const selectors = [
                 '.page-title-content [contenteditable]',
@@ -195,7 +203,7 @@ class DocumentWriter:
                 if (el) {
                     const r = el.getBoundingClientRect();
                     if (r.width > 0 && r.height > 0)
-                        return {x: Math.round(r.x + 20), y: Math.round(r.y + r.height / 2)};
+                        return {x: Math.round(r.x + 20), y: Math.round(r.y + r.height / 2), via: 'selector'};
                 }
             }
             // 兜底：找页面顶部区域内 contenteditable 且不在 .slate-editor 内的元素
@@ -203,23 +211,53 @@ class DocumentWriter:
                 if (el.closest('.slate-editor')) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width > 0 && r.y >= 0 && r.y < 300)
-                    return {x: Math.round(r.x + 20), y: Math.round(r.y + r.height / 2)};
+                    return {x: Math.round(r.x + 20), y: Math.round(r.y + r.height / 2), via: 'fallback'};
             }
             return null;
         }""")
-        if not coords:
-            log.warning("set_title: 未找到标题栏，跳过")
+        if coords:
+            await self.page.mouse.click(coords["x"], coords["y"])
+            await self.page.wait_for_timeout(300)
+            await self.page.keyboard.press("Meta+a")
+            await self.page.wait_for_timeout(100)
+            if title:
+                await self.page.keyboard.type(title, delay=self.type_delay)
+            else:
+                await self.page.keyboard.press("Backspace")
+            await self.page.wait_for_timeout(300)
+            log.debug("set_title (independent input): %r", title[:50] if title else "(cleared)")
             return
-        await self.page.mouse.click(coords["x"], coords["y"])
-        await self.page.wait_for_timeout(300)
-        await self.page.keyboard.press("Meta+a")
-        await self.page.wait_for_timeout(100)
-        if title:
-            await self.page.keyboard.type(title, delay=self.type_delay)
-        else:
-            await self.page.keyboard.press("Backspace")
-        await self.page.wait_for_timeout(300)
-        log.debug("set_title: %r", title[:50] if title else "(cleared)")
+
+        # 路径 B：show-title 模式 — Slate 第一个块就是标题行
+        # 点击 Slate 编辑区第一个段落块，全选后替换
+        title_coords = await self.page.evaluate("""() => {
+            const ed = document.querySelector(
+                '.page-main-content .slate-editor.use-virtual-caret');
+            if (!ed) return null;
+            const container = ed.closest('.sl-editor-container');
+            if (!container || !container.classList.contains('show-title')) return null;
+            // 第一个子块就是标题行
+            const first = ed.children[0];
+            if (!first) return null;
+            const r = first.getBoundingClientRect();
+            if (r.width > 0)
+                return {x: Math.round(r.x + 40), y: Math.round(r.y + Math.max(r.height / 2, 10))};
+            return null;
+        }""")
+        if title_coords:
+            await self.page.mouse.click(title_coords["x"], title_coords["y"])
+            await self.page.wait_for_timeout(300)
+            await self.page.keyboard.press("Meta+a")
+            await self.page.wait_for_timeout(100)
+            if title:
+                await self.page.keyboard.type(title, delay=self.type_delay)
+            else:
+                await self.page.keyboard.press("Backspace")
+            await self.page.wait_for_timeout(300)
+            log.debug("set_title (show-title slate): %r", title[:50] if title else "(cleared)")
+            return
+
+        log.warning("set_title: 未找到标题栏，跳过")
 
     async def focus(self) -> None:
         """将焦点定位到编辑区。每次开始写入前调用一次。"""
@@ -607,14 +645,21 @@ class DocumentWriter:
         }""")
         await self.page.wait_for_timeout(300)
 
-        # ── 3. 插入表格
-        await self._slash_insert("table")
-        try:
-            await self.page.wait_for_selector(
-                "[data-slate-type='table'], table", timeout=5000)
-        except Exception:
-            log.warning("表格未出现，跳过")
-            return
+        # ── 3. 插入表格（失败时重试一次）
+        for attempt in range(2):
+            await self._slash_insert("table")
+            try:
+                await self.page.wait_for_selector(
+                    "[data-slate-type='table'], table", timeout=5000)
+                break
+            except Exception:
+                if attempt == 0:
+                    log.warning("表格未出现，重试一次")
+                    await self._scroll_cursor_into_view()
+                    await self.page.wait_for_timeout(500)
+                else:
+                    log.warning("表格未出现，跳过")
+                    return
 
         # ── 3. 调整表格到目标行列数（默认 3×3，用右键菜单增删行/列）
         await self._adjust_table_dimensions(n_rows, n_cols)
@@ -884,16 +929,19 @@ class DocumentWriter:
     async def _focus_after_divider(self) -> None:
         """分割线插入后，将光标定位到分割线之后的第一个段落。
 
-        如果分割线之后已有段落（通过 Slate fiber 确认），直接 set_selection。
-        如果没有，按 ArrowDown + Home 创建/定位到分割线之后的空行。
+        策略：
+        1. 如果 divider 后已有段落，通过 fiber set_selection 移过去。
+        2. 如果 divider 是最后节点，通过 fiber insertNodes 在后面插入空段落，再移过去。
+           （不依赖键盘 ArrowDown，因为 selection 停在 divider 时键盘无效。）
+        3. 最终兜底：点击 divider DOM 元素下方。
         """
         moved = await self.page.evaluate("""() => {
             var ed = document.querySelector('.page-main-content .slate-editor.use-virtual-caret');
-            if (!ed) return null;
+            if (!ed) return {error: 'no editor'};
             var fiberKey = Object.keys(ed).find(function(k) {
                 return k.startsWith('__reactInternalInstance');
             });
-            if (!fiberKey) return null;
+            if (!fiberKey) return {error: 'no fiber key'};
             function findEditor(node, d) {
                 if (!node || d > 30) return null;
                 if (node.memoizedProps && node.memoizedProps.editor &&
@@ -902,19 +950,19 @@ class DocumentWriter:
                 return findEditor(node.child, d + 1);
             }
             var editor = findEditor(ed[fiberKey], 0);
-            if (!editor || !editor.children) return null;
+            if (!editor || !editor.children) return {error: 'no editor in fiber'};
+
             // 找最后一个 type='divider' 节点
             var divIdx = -1;
             for (var i = editor.children.length - 1; i >= 0; i--) {
-                if (editor.children[i].type === 'divider') {
-                    divIdx = i;
-                    break;
-                }
+                if (editor.children[i].type === 'divider') { divIdx = i; break; }
             }
             if (divIdx === -1) return {error: 'no divider found'};
+
             var targetIdx = divIdx + 1;
+
+            // 情况 A：divider 后已有段落，直接 set_selection
             if (targetIdx < editor.children.length) {
-                // 分割线之后已有段落，直接移过去
                 try {
                     editor.apply({
                         type: 'set_selection',
@@ -926,9 +974,11 @@ class DocumentWriter:
                     });
                     editor.marks = {};
                     return {ok: true, targetIdx: targetIdx, existed: true};
-                } catch(e) { return {error: e.message}; }
+                } catch(e) { return {error: 'set_selection A: ' + e.message}; }
             }
-            // 分割线是最后节点：将选区设到分割线位置，让键盘 ArrowDown 能创建新行
+
+            // 情况 B：divider 是最后节点，用 insertNodes 在后面插入空段落
+            // 先把 selection 移到 divider，然后 insertNodes
             try {
                 editor.apply({
                     type: 'set_selection',
@@ -938,90 +988,93 @@ class DocumentWriter:
                         focus:  {path: [divIdx, 0], offset: 0}
                     }
                 });
-                return {ok: false, needKeyboard: true, divIdx: divIdx};
-            } catch(e) { return {error: e.message}; }
+            } catch(e) { return {error: 'set_selection B pre: ' + e.message}; }
+
+            // insertNodes 在 divider 之后
+            var newParagraph = {type: 'p', id: 'tmp_' + Date.now(), children: [{text: ''}]};
+            try {
+                // Slate transforms.insertNodes at path [divIdx+1]
+                editor.apply({
+                    type: 'insert_node',
+                    path: [divIdx + 1],
+                    node: newParagraph
+                });
+            } catch(e) {
+                // insert_node might not work directly; try via editor.insertNode API
+                try {
+                    if (editor.insertNode) {
+                        // Set selection to end of divider first
+                        editor.insertNode(newParagraph);
+                    } else {
+                        return {error: 'insert_node failed: ' + e.message};
+                    }
+                } catch(e2) { return {error: 'insertNode also failed: ' + e2.message}; }
+            }
+
+            // Now move selection to the new paragraph
+            var newIdx = divIdx + 1;
+            try {
+                editor.apply({
+                    type: 'set_selection',
+                    properties: editor.selection,
+                    newProperties: {
+                        anchor: {path: [newIdx, 0], offset: 0},
+                        focus:  {path: [newIdx, 0], offset: 0}
+                    }
+                });
+                editor.marks = {};
+                return {ok: true, targetIdx: newIdx, existed: false, inserted: true};
+            } catch(e) { return {error: 'set_selection B post: ' + e.message}; }
         }""")
 
         log.debug("_focus_after_divider fiber result: %s", moved)
 
         if moved and moved.get("ok"):
-            await self.page.wait_for_timeout(400)
+            await self.page.wait_for_timeout(300)
             await self._click_slate_path_node(moved["targetIdx"])
             await self._scroll_cursor_into_view()
-            log.debug("_focus_after_divider: via Slate fiber targetIdx=%s existed=%s",
-                      moved["targetIdx"], moved.get("existed"))
+            log.debug("_focus_after_divider: via fiber targetIdx=%s inserted=%s",
+                      moved["targetIdx"], moved.get("inserted"))
             return
 
-        # 分割线是最后节点：点击分割线DOM元素获取DOM focus，再用键盘移到后续行
-        if moved and moved.get("needKeyboard"):
-            # 找分割线 DOM 元素并点击（divider DOM: sl-line without sl-paragraph）
-            coords = await self.page.evaluate("""() => {
-                var ed = document.querySelector(
-                    '.page-main-content .slate-editor.use-virtual-caret');
-                if (!ed) return null;
-                var children = Array.from(ed.children);
-                for (var i = children.length - 1; i >= 0; i--) {
-                    var cls = children[i].className || '';
-                    if (cls.includes('sl-line') && !cls.includes('sl-paragraph')) {
-                        var r = children[i].getBoundingClientRect();
-                        if (r.width > 0) {
-                            children[i].scrollIntoView({block: 'center'});
-                            r = children[i].getBoundingClientRect();
-                            return {
-                                x: Math.round(r.x + r.width * 0.3),
-                                y: Math.round(r.y + Math.max(r.height / 2, 8))
-                            };
-                        }
-                    }
-                }
-                // fallback: last child
-                var last = children[children.length - 1];
-                if (last) {
-                    last.scrollIntoView({block: 'center'});
-                    var lr = last.getBoundingClientRect();
-                    if (lr && lr.width > 0)
-                        return {x: Math.round(lr.x + lr.width * 0.3),
-                                y: Math.round(lr.y + Math.max(lr.height / 2, 8))};
-                }
-                return null;
-            }""")
-            if coords:
-                await self.page.mouse.click(coords["x"], coords["y"])
-                await self.page.wait_for_timeout(400)
-            # ArrowDown should move cursor past the divider to the next/new line
-            await self.page.keyboard.press("ArrowDown")
-            await self.page.wait_for_timeout(300)
-            await self.page.keyboard.press("Home")
-            await self.page.wait_for_timeout(200)
-            await self._scroll_cursor_into_view()
-            log.debug("_focus_after_divider: via keyboard ArrowDown+Home")
-            return
-
-        # 完全回退：DOM 方式
-        log.warning("_focus_after_divider: fiber failed (%s), falling back to DOM", moved)
-        coords = await self.page.evaluate("""() => {
+        # 兜底：点击 divider DOM 下方空白处
+        log.warning("_focus_after_divider: fiber failed (%s), falling back to DOM click", moved)
+        clicked = await self.page.evaluate("""() => {
             var ed = document.querySelector(
                 '.page-main-content .slate-editor.use-virtual-caret');
-            if (!ed) return null;
+            if (!ed) return false;
             var children = Array.from(ed.children);
-            var last = children[children.length - 1];
-            if (!last) return null;
-            last.scrollIntoView({block: 'center'});
-            var r = last.getBoundingClientRect();
-            if (r.width > 0) {
-                return {x: Math.round(r.x + r.width * 0.3),
-                        y: Math.round(r.y + Math.max(r.height / 2, 8))};
+            // 找最后一个 sl-line（不是 sl-paragraph）= divider DOM
+            for (var i = children.length - 1; i >= 0; i--) {
+                var cls = children[i].className || '';
+                if (cls.includes('sl-line') && !cls.includes('sl-paragraph')) {
+                    // 点击 divider 下方：取 divider 的 bottom + 10px
+                    var r = children[i].getBoundingClientRect();
+                    children[i].scrollIntoView({block: 'center'});
+                    r = children[i].getBoundingClientRect();
+                    return {x: Math.round(r.x + r.width * 0.3),
+                            y: Math.round(r.bottom + 10)};
+                }
             }
-            var er = ed.getBoundingClientRect();
-            return {x: Math.round(er.x + er.width * 0.3), y: Math.round(er.bottom - 20)};
+            // fallback: last child bottom
+            var last = children[children.length - 1];
+            if (last) {
+                last.scrollIntoView({block: 'center'});
+                var lr = last.getBoundingClientRect();
+                return {x: Math.round(lr.x + lr.width * 0.3), y: Math.round(lr.bottom + 10)};
+            }
+            return null;
         }""")
-        if coords:
-            await self.page.mouse.click(coords["x"], coords["y"])
-        await self.page.wait_for_timeout(400)
+        if clicked and isinstance(clicked, dict):
+            await self.page.mouse.click(clicked["x"], clicked["y"])
+            await self.page.wait_for_timeout(400)
         await self._scroll_cursor_into_view()
 
     async def _focus_editor(self) -> None:
-        """坐标点击编辑区，避免被遮挡层拦截。优先点击最后一个普通段落块。"""
+        """坐标点击编辑区，避免被遮挡层拦截。优先点击最后一个普通段落块。
+
+        show-title 模式：Slate 第一个块是标题行，必须跳过，否则光标会落在标题区。
+        """
         # 先把内部 scroll 容器滚到顶部，确保第一个块可见
         await self._scroll_container_to_top()
         await self.page.wait_for_timeout(300)
@@ -1029,9 +1082,15 @@ class DocumentWriter:
             const ed = document.querySelector(
                 '.page-main-content .slate-editor.use-virtual-caret');
             if (!ed) return null;
-            // 优先：最后一个普通段落（非表格/分割线/高亮块）
+            const container = ed.closest('.sl-editor-container');
+            const isShowTitle = container && container.classList.contains('show-title');
+
             const children = Array.from(ed.children);
-            for (let i = children.length - 1; i >= 0; i--) {
+            // show-title 模式跳过第一个块（标题行）
+            const startIdx = isShowTitle ? 1 : 0;
+
+            // 优先：最后一个普通段落（非表格/分割线/高亮块）
+            for (let i = children.length - 1; i >= startIdx; i--) {
                 const b = children[i];
                 if (b.classList.contains('sl-table-wrap')) continue;
                 if (b.querySelector('[data-slate-type="table"]')) continue;
@@ -1042,17 +1101,17 @@ class DocumentWriter:
                 if (r.width > 0 && r.y >= 0 && r.y < window.innerHeight)
                     return {x: Math.round(r.x + r.width * 0.3), y: Math.round(r.y + r.height / 2)};
             }
-            // 兜底：点任意可见子块
-            for (let i = children.length - 1; i >= 0; i--) {
+            // 兜底：点任意可见子块（仍跳过标题行）
+            for (let i = children.length - 1; i >= startIdx; i--) {
                 const b = children[i];
                 if (b.classList.contains('sl-table-wrap')) continue;
                 const r = b.getBoundingClientRect();
                 if (r.width > 0 && r.y >= 0 && r.y < window.innerHeight)
                     return {x: Math.round(r.x + r.width * 0.3), y: Math.round(r.y + r.height / 2)};
             }
-            // 最终兜底：编辑区中部
+            // 最终兜底：编辑区中部（y + 80 跳过标题行高度）
             const er = ed.getBoundingClientRect();
-            return {x: Math.round(er.x + er.width * 0.3), y: Math.round(er.y + 40)};
+            return {x: Math.round(er.x + er.width * 0.3), y: Math.round(er.y + (isShowTitle ? 80 : 40))};
         }""")
         if coords:
             await self.page.mouse.click(coords["x"], coords["y"])
@@ -1846,20 +1905,40 @@ class DocumentWriter:
             }
             if (!scEl || scEl === document.documentElement) return;
 
-            // 定位光标所在 DOM 节点
-            const sel = window.getSelection();
+            // 优先：通过 Slate fiber selection 定位目标块（DOM selection 永远在 caret-position-wrap，不可靠）
             let targetEl = null;
-            if (sel && sel.anchorNode) {
-                const node = sel.anchorNode.nodeType === 3
-                    ? sel.anchorNode.parentElement : sel.anchorNode;
-                // 找到 ed 的直接子块
-                let cur = node;
-                while (cur && cur.parentElement && cur.parentElement !== ed)
-                    cur = cur.parentElement;
-                if (cur && cur !== ed) targetEl = cur;
+            const fiberKey = Object.keys(ed).find(k => k.startsWith('__reactInternalInstance'));
+            if (fiberKey) {
+                function findEditor(node, d) {
+                    if (!node || d > 30) return null;
+                    if (node.memoizedProps && node.memoizedProps.editor &&
+                        node.memoizedProps.editor.marks !== undefined)
+                        return node.memoizedProps.editor;
+                    return findEditor(node.child, d + 1);
+                }
+                const editor = findEditor(ed[fiberKey], 0);
+                if (editor && editor.selection) {
+                    const pathIdx = editor.selection.anchor.path[0];
+                    if (typeof pathIdx === 'number') {
+                        const children = Array.from(ed.children);
+                        targetEl = children[pathIdx] || null;
+                    }
+                }
+            }
+
+            // 回退：DOM selection（虽然不准确，至少不会崩）
+            if (!targetEl) {
+                const sel = window.getSelection();
+                if (sel && sel.anchorNode) {
+                    const node = sel.anchorNode.nodeType === 3
+                        ? sel.anchorNode.parentElement : sel.anchorNode;
+                    let cur = node;
+                    while (cur && cur.parentElement && cur.parentElement !== ed)
+                        cur = cur.parentElement;
+                    if (cur && cur !== ed) targetEl = cur;
+                }
             }
             if (!targetEl) {
-                // 没有 selection，用 ed 最后一个子块
                 const children = Array.from(ed.children);
                 targetEl = children[children.length - 1] || ed;
             }
