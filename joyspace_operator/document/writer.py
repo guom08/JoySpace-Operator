@@ -596,7 +596,18 @@ class DocumentWriter:
         # ── 1. 确保在空行
         await self._ensure_empty_line()
 
-        # ── 2. 插入表格
+        # ── 2. 把光标所在行滚入视口，斜杠菜单才能出现在屏幕内
+        await self.page.evaluate("""() => {
+            const sel = window.getSelection();
+            if (sel && sel.anchorNode) {
+                const node = sel.anchorNode.nodeType === 1
+                    ? sel.anchorNode : sel.anchorNode.parentElement;
+                if (node) node.scrollIntoView({block: 'center'});
+            }
+        }""")
+        await self.page.wait_for_timeout(300)
+
+        # ── 3. 插入表格
         await self._slash_insert("table")
         try:
             await self.page.wait_for_selector(
@@ -936,6 +947,7 @@ class DocumentWriter:
         if moved and moved.get("ok"):
             await self.page.wait_for_timeout(400)
             await self._click_slate_path_node(moved["targetIdx"])
+            await self._scroll_cursor_into_view()
             log.debug("_focus_after_divider: via Slate fiber targetIdx=%s existed=%s",
                       moved["targetIdx"], moved.get("existed"))
             return
@@ -952,18 +964,25 @@ class DocumentWriter:
                     var cls = children[i].className || '';
                     if (cls.includes('sl-line') && !cls.includes('sl-paragraph')) {
                         var r = children[i].getBoundingClientRect();
-                        if (r.width > 0) return {
-                            x: Math.round(r.x + r.width * 0.3),
-                            y: Math.round(r.y + Math.max(r.height / 2, 8))
-                        };
+                        if (r.width > 0) {
+                            children[i].scrollIntoView({block: 'center'});
+                            r = children[i].getBoundingClientRect();
+                            return {
+                                x: Math.round(r.x + r.width * 0.3),
+                                y: Math.round(r.y + Math.max(r.height / 2, 8))
+                            };
+                        }
                     }
                 }
                 // fallback: last child
                 var last = children[children.length - 1];
-                var lr = last && last.getBoundingClientRect();
-                if (lr && lr.width > 0)
-                    return {x: Math.round(lr.x + lr.width * 0.3),
-                            y: Math.round(lr.y + Math.max(lr.height / 2, 8))};
+                if (last) {
+                    last.scrollIntoView({block: 'center'});
+                    var lr = last.getBoundingClientRect();
+                    if (lr && lr.width > 0)
+                        return {x: Math.round(lr.x + lr.width * 0.3),
+                                y: Math.round(lr.y + Math.max(lr.height / 2, 8))};
+                }
                 return null;
             }""")
             if coords:
@@ -974,6 +993,7 @@ class DocumentWriter:
             await self.page.wait_for_timeout(300)
             await self.page.keyboard.press("Home")
             await self.page.wait_for_timeout(200)
+            await self._scroll_cursor_into_view()
             log.debug("_focus_after_divider: via keyboard ArrowDown+Home")
             return
 
@@ -986,12 +1006,9 @@ class DocumentWriter:
             var children = Array.from(ed.children);
             var last = children[children.length - 1];
             if (!last) return null;
+            last.scrollIntoView({block: 'center'});
             var r = last.getBoundingClientRect();
             if (r.width > 0) {
-                if (r.y < 0 || r.y > window.innerHeight) {
-                    last.scrollIntoView({block: 'nearest'});
-                    r = last.getBoundingClientRect();
-                }
                 return {x: Math.round(r.x + r.width * 0.3),
                         y: Math.round(r.y + Math.max(r.height / 2, 8))};
             }
@@ -1001,6 +1018,7 @@ class DocumentWriter:
         if coords:
             await self.page.mouse.click(coords["x"], coords["y"])
         await self.page.wait_for_timeout(400)
+        await self._scroll_cursor_into_view()
 
     async def _focus_editor(self) -> None:
         """坐标点击编辑区，避免被遮挡层拦截。优先点击最后一个普通段落块。"""
@@ -1294,9 +1312,11 @@ class DocumentWriter:
             await self.page.keyboard.press("End")
             await self.page.keyboard.press("Enter")
             await self.page.wait_for_timeout(200)
+            await self._scroll_cursor_into_view()
 
     async def _slash_insert(self, alias: str) -> None:
         """执行斜杠命令：先单独打 /，等菜单弹出，再逐字输入 alias 过滤，最后 Enter 确认。"""
+        await self._scroll_cursor_into_view()
         await self.page.keyboard.type("/", delay=80)
         await self.page.wait_for_timeout(600)   # 等斜杠菜单弹出
         await self.page.keyboard.type(alias, delay=80)
@@ -1805,6 +1825,53 @@ class DocumentWriter:
 
         # 拖拽列分隔线
         await self._drag_col_resize(col_pxs, tbl_info["x"])
+
+    async def _scroll_cursor_into_view(self) -> None:
+        """把当前光标所在行滚动到视口 40% 处，确保光标下方有足够的交互空间。
+
+        JoySpace 使用内部 overflow-scroll 容器而非 window.scroll，所以不能用
+        scrollIntoView 然后依赖 window.scrollY — 必须直接操作内部容器的 scrollTop。
+        """
+        await self.page.evaluate("""() => {
+            // 找 overflow-scroll 容器
+            const ed = document.querySelector(
+                '.page-main-content .slate-editor.use-virtual-caret');
+            if (!ed) return;
+            let scEl = ed.parentElement;
+            while (scEl && scEl !== document.documentElement) {
+                const s = window.getComputedStyle(scEl);
+                if (['scroll','auto'].includes(s.overflow) ||
+                    ['scroll','auto'].includes(s.overflowY)) break;
+                scEl = scEl.parentElement;
+            }
+            if (!scEl || scEl === document.documentElement) return;
+
+            // 定位光标所在 DOM 节点
+            const sel = window.getSelection();
+            let targetEl = null;
+            if (sel && sel.anchorNode) {
+                const node = sel.anchorNode.nodeType === 3
+                    ? sel.anchorNode.parentElement : sel.anchorNode;
+                // 找到 ed 的直接子块
+                let cur = node;
+                while (cur && cur.parentElement && cur.parentElement !== ed)
+                    cur = cur.parentElement;
+                if (cur && cur !== ed) targetEl = cur;
+            }
+            if (!targetEl) {
+                // 没有 selection，用 ed 最后一个子块
+                const children = Array.from(ed.children);
+                targetEl = children[children.length - 1] || ed;
+            }
+
+            // 把目标块滚到视口 40% 处
+            const scRect = scEl.getBoundingClientRect();
+            const tRect  = targetEl.getBoundingClientRect();
+            const tAbsTop = tRect.top - scRect.top + scEl.scrollTop;
+            const desired = tAbsTop - scEl.clientHeight * 0.4;
+            scEl.scrollTop = Math.max(0, desired);
+        }""")
+        await self.page.wait_for_timeout(200)
 
     async def _scroll_container_to_top(self) -> None:
         """把编辑区的内部 scroll 容器滚回顶部（JoySpace 不用 window scroll）。"""
