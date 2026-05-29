@@ -14,6 +14,48 @@ EDITOR_SEL = ".page-main-content .slate-editor.use-virtual-caret"
 TITLE_SEL   = "[placeholder*='标题'], [class*='title-input']"
 
 
+async def create_doc(page: Page, timeout: int = 30_000) -> tuple[str, Page]:
+    """在 JoySpace 首页新建一个空白文档，返回 (url, new_page)。
+
+    步骤：首页 → 点击"新建" → 菜单选"文档" → 模板弹窗点"新建空白文档"
+          → 新标签页打开 → 等待编辑器就绪 → 返回 (url, page)。
+    """
+    log.info("新建空白文档…")
+    await page.goto("https://joyspace.jd.com/", wait_until="domcontentloaded", timeout=timeout)
+    await _wait_for_login(page)
+    await _dismiss_popups(page)
+
+    # 点击左上角"新建"按钮
+    await page.wait_for_selector("text=新建", timeout=timeout)
+    await page.click("text=新建")
+    await page.wait_for_timeout(800)
+
+    # 下拉菜单里点"文档"——用 JS 直接触发点击，防止 survey 弹窗抢走焦点关闭菜单
+    clicked = await page.evaluate("""() => {
+        const items = Array.from(document.querySelectorAll('.create-button-menu__item'));
+        const doc = items.find(el => el.innerText.trim() === '文档');
+        if (doc) { doc.click(); return true; }
+        return false;
+    }""")
+    if not clicked:
+        raise RuntimeError("未找到'文档'菜单项")
+    await page.wait_for_timeout(800)
+
+    # 模板弹窗里点"新建空白文档"——会在新标签页打开文档
+    await page.wait_for_selector("text=新建空白文档", timeout=timeout)
+    async with page.context.expect_page(timeout=timeout) as page_info:
+        await page.click("text=新建空白文档")
+    new_page = await page_info.value
+
+    # 等待新标签页编辑器就绪
+    await new_page.wait_for_load_state("domcontentloaded", timeout=timeout)
+    await new_page.wait_for_selector(EDITOR_SEL, timeout=timeout)
+
+    doc_url = new_page.url
+    log.info("新文档已创建: %s", doc_url)
+    return doc_url, new_page
+
+
 async def open_doc(page: Page, url: str, timeout: int = 30_000) -> None:
     """导航到文档 URL 并等待 Slate 编辑器加载完毕。"""
     log.info("打开文档: %s", url)
