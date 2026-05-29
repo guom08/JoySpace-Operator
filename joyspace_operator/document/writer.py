@@ -224,53 +224,18 @@ class DocumentWriter:
     async def focus(self) -> None:
         """将焦点定位到编辑区。每次开始写入前调用一次。"""
         await self._focus_editor()
+        # JS focus 确保 virtual-caret-input 激活，坐标点击有时落在非交互区
+        await self._refocus_virtual_caret()
 
     async def heading(self, level: int, text: str) -> None:
-        """写入标题（level: 1–6）。
-
-        主路径：斜杠命令 /h1~/h6。
-        若斜杠命令未生效（光标块仍为 p 类型），回退到：
-          输入文字 → 全选该行 → 工具栏"正文"按钮 → 弹出选择框选对应级别。
-        """
+        """写入标题（level: 1–6）via 斜杠命令 /h1~/h6。"""
         assert 1 <= level <= 6, "level 支持 1–6"
         await self._ensure_empty_line()
         await self._slash_insert(f"h{level}")
-
-        # 验证斜杠命令是否生效（当前光标所在块的 data-slate-type）
-        ok = await self._current_block_type_is_heading(level)
-        if ok:
-            await self.page.keyboard.type(text, delay=self.type_delay)
-            await self.page.keyboard.press("Enter")
-            await self.page.wait_for_timeout(400)
-            log.debug("H%d (slash): %s", level, text[:50])
-            return
-
-        # 回退路径：斜杠命令未生效，先输入文字再用工具栏设置标题
-        log.warning("H%d slash 未生效，改用工具栏", level)
-        # 此时光标在一个空行，斜杠命令可能把"/"打进去了——先清掉
-        await self.page.keyboard.press("Meta+a")
-        await self.page.wait_for_timeout(100)
-        await self.page.keyboard.press("Backspace")
-        await self.page.wait_for_timeout(200)
-
-        # 输入文字
         await self.page.keyboard.type(text, delay=self.type_delay)
-        await self.page.wait_for_timeout(300)
-
-        # 全选当前行
-        await self.page.keyboard.press("Home")
-        await self.page.keyboard.press("Shift+End")
-        await self.page.wait_for_timeout(300)
-
-        # 点工具栏"正文"按钮（段落类型选择器）
-        toolbar_ok = await self._set_heading_via_toolbar(level)
-        if not toolbar_ok:
-            log.warning("H%d 工具栏也失败，文字已写入但格式未设置", level)
-
-        await self.page.keyboard.press("End")
         await self.page.keyboard.press("Enter")
         await self.page.wait_for_timeout(400)
-        log.debug("H%d (toolbar fallback): %s", level, text[:50])
+        log.debug("H%d: %s", level, text[:50])
 
     async def paragraph(self, text: str) -> None:
         """写入普通段落（末尾自动 Enter）。"""
@@ -2152,27 +2117,29 @@ class DocumentWriter:
     # ------------------------------------------------------------------ #
 
     async def _current_block_type_is_heading(self, level: int) -> bool:
-        """检查光标所在块是否为指定级别的标题（通过 Slate fiber 读 type）。"""
+        """检查光标所在块是否为指定级别的标题。
+
+        先用 DOM selection 判断（不依赖 fiber.selection 是否为 null），
+        找到光标所在的顶层 [data-slate-node="element"] 块，检查其 data-slate-type。
+        """
         expected = f"h{level}"
         result = await self.page.evaluate(f"""() => {{
-            var ed = document.querySelector('.page-main-content .slate-editor.use-virtual-caret');
+            // 用浏览器原生 selection 定位光标所在 DOM 节点
+            const sel = window.getSelection();
+            if (!sel || !sel.anchorNode) return false;
+            let node = sel.anchorNode;
+            // 向上找到 [data-slate-node="element"] 顶层块
+            const ed = document.querySelector('.page-main-content .slate-editor.use-virtual-caret');
             if (!ed) return false;
-            var fiberKey = Object.keys(ed).find(function(k) {{
-                return k.startsWith('__reactInternalInstance');
-            }});
-            if (!fiberKey) return false;
-            function findEditor(node, d) {{
-                if (!node || d > 30) return null;
-                if (node.memoizedProps && node.memoizedProps.editor &&
-                    node.memoizedProps.editor.marks !== undefined)
-                    return node.memoizedProps.editor;
-                return findEditor(node.child, d + 1);
+            while (node && node !== ed) {{
+                if (node.nodeType === 1 && node.dataset &&
+                    node.dataset.slateNode === 'element' &&
+                    node.parentElement === ed) {{
+                    return node.dataset.slateType === '{expected}';
+                }}
+                node = node.parentElement;
             }}
-            var editor = findEditor(ed[fiberKey], 0);
-            if (!editor || !editor.selection) return false;
-            var idx = editor.selection.anchor.path[0];
-            var block = editor.children[idx];
-            return block && block.type === '{expected}';
+            return false;
         }}""")
         return bool(result)
 
