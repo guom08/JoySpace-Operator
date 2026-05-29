@@ -991,24 +991,26 @@ class DocumentWriter:
             } catch(e) { return {error: 'set_selection B pre: ' + e.message}; }
 
             // insertNodes 在 divider 之后
-            var newParagraph = {type: 'p', id: 'tmp_' + Date.now(), children: [{text: ''}]};
-            try {
-                // Slate transforms.insertNodes at path [divIdx+1]
-                editor.apply({
-                    type: 'insert_node',
-                    path: [divIdx + 1],
-                    node: newParagraph
-                });
-            } catch(e) {
-                // insert_node might not work directly; try via editor.insertNode API
+            // 生成 JoySpace 格式的 6 字符 base62 id（避免 tmp_ 前缀被 JoySpace 斜杠菜单拒绝）
+            var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+            var newId = Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+            var newParagraph = {type: 'p', id: newId, children: [{text: ''}]};
+
+            // 优先用高层 API editor.insertNode（会触发 JoySpace 内部节点注册）
+            var inserted = false;
+            if (editor.insertNode) {
                 try {
-                    if (editor.insertNode) {
-                        // Set selection to end of divider first
-                        editor.insertNode(newParagraph);
-                    } else {
-                        return {error: 'insert_node failed: ' + e.message};
-                    }
-                } catch(e2) { return {error: 'insertNode also failed: ' + e2.message}; }
+                    editor.insertNode(newParagraph);
+                    inserted = true;
+                } catch(e) {}
+            }
+            if (!inserted) {
+                try {
+                    editor.apply({type: 'insert_node', path: [divIdx + 1], node: newParagraph});
+                    inserted = true;
+                } catch(e) {
+                    return {error: 'insert_node failed: ' + e.message};
+                }
             }
 
             // Now move selection to the new paragraph
@@ -1033,6 +1035,13 @@ class DocumentWriter:
             await self.page.wait_for_timeout(300)
             await self._click_slate_path_node(moved["targetIdx"])
             await self._scroll_cursor_into_view()
+            # 激活段落的 slash 菜单上下文：输入一个占位符字符再删除
+            # 不做这一步，slash 菜单出现但无选项（JoySpace 内部状态未初始化）
+            await self._refocus_virtual_caret()
+            await self.page.keyboard.type("a", delay=50)
+            await self.page.wait_for_timeout(100)
+            await self.page.keyboard.press("Backspace")
+            await self.page.wait_for_timeout(200)
             log.debug("_focus_after_divider: via fiber targetIdx=%s inserted=%s",
                       moved["targetIdx"], moved.get("inserted"))
             return
