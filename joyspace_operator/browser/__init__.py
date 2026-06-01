@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,10 +10,15 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, asyn
 
 load_dotenv()
 
-_USER_DATA_DIR = os.getenv(
-    "CHROME_USER_DATA_DIR",
-    str(Path.home() / "Library/Application Support/Google/Chrome/JoySpaceProfile"),
-)
+
+def _default_user_data_dir() -> str:
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))
+        return str(Path(base) / "Google/Chrome/User Data/JoySpaceProfile")
+    return str(Path.home() / "Library/Application Support/Google/Chrome/JoySpaceProfile")
+
+
+_USER_DATA_DIR = os.getenv("CHROME_USER_DATA_DIR", _default_user_data_dir())
 
 
 async def launch_persistent_context(playwright: Playwright) -> BrowserContext:

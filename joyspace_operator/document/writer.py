@@ -149,9 +149,9 @@ class DocumentWriter:
                 break
             log.debug("clear 循环: word_count=%d, has_table=%s", wc, has_tbl)
             await self._focus_title_or_body()
-            await self.page.keyboard.press("Meta+a")
+            await self.page.keyboard.press("ControlOrMeta+a")
             await self.page.wait_for_timeout(150)
-            await self.page.keyboard.press("Meta+a")
+            await self.page.keyboard.press("ControlOrMeta+a")
             await self.page.wait_for_timeout(300)
             await self.page.keyboard.press("Backspace")
             await self.page.wait_for_timeout(600)
@@ -168,7 +168,7 @@ class DocumentWriter:
             if not has_empty_list:
                 break
             await self._focus_title_or_body()
-            await self.page.keyboard.press("Meta+End")
+            await self.page.keyboard.press("ControlOrMeta+End")
             await self.page.wait_for_timeout(150)
             await self.page.keyboard.press("Backspace")
             await self.page.wait_for_timeout(300)
@@ -218,7 +218,7 @@ class DocumentWriter:
         if coords:
             await self.page.mouse.click(coords["x"], coords["y"])
             await self.page.wait_for_timeout(300)
-            await self.page.keyboard.press("Meta+a")
+            await self.page.keyboard.press("ControlOrMeta+a")
             await self.page.wait_for_timeout(100)
             if title:
                 await self.page.keyboard.type(title, delay=self.type_delay)
@@ -247,7 +247,7 @@ class DocumentWriter:
         if title_coords:
             await self.page.mouse.click(title_coords["x"], title_coords["y"])
             await self.page.wait_for_timeout(300)
-            await self.page.keyboard.press("Meta+a")
+            await self.page.keyboard.press("ControlOrMeta+a")
             await self.page.wait_for_timeout(100)
             if title:
                 await self.page.keyboard.type(title, delay=self.type_delay)
@@ -277,6 +277,9 @@ class DocumentWriter:
 
     async def paragraph(self, text: str) -> None:
         """写入普通段落（末尾自动 Enter）。"""
+        if await self._is_cursor_in_list():
+            await self.page.keyboard.press("Backspace")
+            await self.page.wait_for_timeout(200)
         await self.page.keyboard.type(text, delay=self.type_delay)
         await self.page.keyboard.press("Enter")
         await self.page.wait_for_timeout(200)
@@ -1574,7 +1577,7 @@ class DocumentWriter:
         if info.get("has_input"):
             await self.page.mouse.click(info["inp_x"], info["inp_y"])
             await self.page.wait_for_timeout(150)
-            await self.page.keyboard.press("Meta+a")
+            await self.page.keyboard.press("ControlOrMeta+a")
             await self.page.keyboard.type(str(count))
             await self.page.wait_for_timeout(150)
             await self.page.mouse.click(info["insert_x"], info["insert_y"])
@@ -2435,22 +2438,30 @@ class DocumentWriter:
         }""")
 
     async def _is_cursor_in_list(self) -> bool:
-        """检测光标是否在无序列表项内。"""
+        """检测光标是否在列表项内（无序、有序、待办均检测）。"""
         return await self.page.evaluate("""() => {
+            const LIST_SELECTORS = [
+                '[data-slate-type="ul-item"]', '[data-slate-type="ul"]',
+                '[data-slate-type="ol-item"]', '[data-slate-type="ol"]',
+                '[data-slate-type="todo-item"]', '[data-slate-type="todo"]',
+                '[data-slate-type="list-item"]',
+                'li', 'ul', 'ol',
+            ];
+            const LIST_TYPES = new Set([
+                'ul-item', 'ul', 'ol-item', 'ol',
+                'todo-item', 'todo', 'list-item', 'li',
+            ]);
+
             const sel = window.getSelection();
-            if (!sel || !sel.anchorNode) return false;
-            let node = sel.anchorNode.nodeType === 3
-                ? sel.anchorNode.parentElement : sel.anchorNode;
-            while (node) {
-                if (node.matches) {
-                    if (node.matches('[data-slate-type="ul-item"]') ||
-                        node.matches('[data-slate-type="ul"]') ||
-                        node.matches('[data-slate-type="list-item"]') ||
-                        node.matches('li') || node.matches('ul'))
+            if (sel && sel.anchorNode) {
+                let node = sel.anchorNode.nodeType === 3
+                    ? sel.anchorNode.parentElement : sel.anchorNode;
+                while (node) {
+                    if (node.matches && LIST_SELECTORS.some(s => node.matches(s)))
                         return true;
+                    if (node.classList && node.classList.contains('slate-editor')) break;
+                    node = node.parentElement;
                 }
-                if (node.classList && node.classList.contains('slate-editor')) break;
-                node = node.parentElement;
             }
             // 也检查 Slate fiber type
             const ed = document.querySelector('.page-main-content .slate-editor.use-virtual-caret');
@@ -2468,8 +2479,7 @@ class DocumentWriter:
             if (!editor || !editor.selection) return false;
             const idx = editor.selection.anchor.path[0];
             const block = editor.children[idx];
-            return block && (block.type === 'ul-item' || block.type === 'li' ||
-                             block.type === 'list-item' || block.type === 'ul');
+            return block && LIST_TYPES.has(block.type);
         }""")
 
     async def _ensure_ordered_list_starts_at_one(self) -> None:

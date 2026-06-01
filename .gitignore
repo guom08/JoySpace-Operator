@@ -13,3 +13,10 @@ playwright/.auth/
 
 # Chrome profile managed externally – not committed
 # (set path in .env)
+
+# Browser state and screenshots
+.browser_state/
+/tmp/
+
+# Claude Code session data
+.claude/
