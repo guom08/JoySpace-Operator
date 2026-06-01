@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
-# JoySpace Writer 一键迁移脚本
+# JoySpace Operator 一键迁移脚本（含 Writer + Reader）
 # 在目标机器上运行，自动完成环境配置
 # 前置条件：JoySpace-Operator 代码已复制到 ~/JoySpace-Operator
 # ──────────────────────────────────────────────────────────
@@ -19,6 +19,7 @@ HOME_DIR="$HOME"
 OPERATOR_DIR="$HOME_DIR/JoySpace-Operator"
 CLAUDE_DIR="$HOME_DIR/.claude"
 PLUGIN_DIR="$CLAUDE_DIR/plugins/local/joyspace-writer"
+READER_PLUGIN_DIR="$CLAUDE_DIR/plugins/local/joyspace-reader"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 
 echo ""
@@ -89,13 +90,42 @@ cat > "$PLUGIN_DIR/.claude-plugin/plugin.json" << 'PJEOF'
 PJEOF
 info "plugin.json 已创建"
 
+# ── Step 4b: 创建 Reader Plugin ──
+mkdir -p "$READER_PLUGIN_DIR/.claude-plugin"
+mkdir -p "$READER_PLUGIN_DIR/skills/joyspace-reader"
+
+cat > "$READER_PLUGIN_DIR/.claude-plugin/plugin.json" << 'RPJEOF'
+{
+  "name": "joyspace-reader",
+  "description": "Read and extract structured content from JoySpace documents using Playwright automation",
+  "author": {
+    "name": "joyspace-team"
+  }
+}
+RPJEOF
+
+# 部署 reader SKILL.md
+READER_SKILL_SRC="$READER_PLUGIN_DIR/skills/joyspace-reader/SKILL.md"
+if [ -f "$OPERATOR_DIR/plugins/joyspace-reader/SKILL.md" ]; then
+    sed "s|/Users/guomu/JoySpace-Operator|$OPERATOR_DIR|g; s|/Users/guomu/|$HOME_DIR/|g" \
+        "$OPERATOR_DIR/plugins/joyspace-reader/SKILL.md" > "$READER_SKILL_SRC"
+elif [ -f "$CLAUDE_DIR/plugins/local/joyspace-reader/skills/joyspace-reader/SKILL.md" ] && \
+   [ "$CLAUDE_DIR/plugins/local/joyspace-reader/skills/joyspace-reader/SKILL.md" != "$READER_SKILL_SRC" ]; then
+    cp "$CLAUDE_DIR/plugins/local/joyspace-reader/skills/joyspace-reader/SKILL.md" "$READER_SKILL_SRC"
+fi
+if [ -f "$READER_SKILL_SRC" ]; then
+    sed -i.bak "s|/Users/guomu/JoySpace-Operator|$OPERATOR_DIR|g; s|/Users/guomu/|$HOME_DIR/|g" \
+        "$READER_SKILL_SRC" && rm -f "$READER_SKILL_SRC.bak"
+fi
+info "joyspace-reader plugin 已创建"
+
 # ── Step 5: 复制并替换 SKILL.md 中的路径 ──
 echo ""
 echo "── Step 5: 部署 SKILL.md（自动替换路径）──"
 SKILL_SRC="$PLUGIN_DIR/skills/joyspace-writer/SKILL.md"
 
-if [ -f "$OPERATOR_DIR/.claude/plugins/local/joyspace-writer/skills/joyspace-writer/SKILL.md" ]; then
-    SOURCE_SKILL="$OPERATOR_DIR/.claude/plugins/local/joyspace-writer/skills/joyspace-writer/SKILL.md"
+if [ -f "$OPERATOR_DIR/plugins/joyspace-writer/SKILL.md" ]; then
+    SOURCE_SKILL="$OPERATOR_DIR/plugins/joyspace-writer/SKILL.md"
 elif [ -f "$CLAUDE_DIR/plugins/local/joyspace-writer/skills/joyspace-writer/SKILL.md" ]; then
     SOURCE_SKILL="$CLAUDE_DIR/plugins/local/joyspace-writer/skills/joyspace-writer/SKILL.md"
 elif [ -f "$CLAUDE_DIR/skills/joyspace-writer/SKILL.md" ]; then
@@ -125,7 +155,8 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     cat > "$SETTINGS_FILE" << 'SJEOF'
 {
   "enabledPlugins": {
-    "joyspace-writer@local": true
+    "joyspace-writer@local": true,
+    "joyspace-reader@local": true
   }
 }
 SJEOF
@@ -136,9 +167,13 @@ import json, sys
 with open('$SETTINGS_FILE') as f:
     cfg = json.load(f)
 plugins = cfg.setdefault('enabledPlugins', {})
-if plugins.get('joyspace-writer@local') is True:
+changed = False
+for p in ['joyspace-writer@local', 'joyspace-reader@local']:
+    if plugins.get(p) is not True:
+        plugins[p] = True
+        changed = True
+if not changed:
     sys.exit(0)
-plugins['joyspace-writer@local'] = True
 with open('$SETTINGS_FILE', 'w') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write('\n')

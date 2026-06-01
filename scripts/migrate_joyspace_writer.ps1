@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────
-# JoySpace Writer 一键迁移脚本 (Windows PowerShell)
+# JoySpace Operator 一键迁移脚本 (Windows PowerShell)（含 Writer + Reader）
 # 在目标机器上运行，自动完成环境配置
 # 前置条件：JoySpace-Operator 代码已复制到 ~/JoySpace-Operator
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\migrate_joyspace_writer.ps1
@@ -14,6 +14,7 @@ $HomeDir     = $env:USERPROFILE
 $OperatorDir = Join-Path $HomeDir "JoySpace-Operator"
 $ClaudeDir   = Join-Path $HomeDir ".claude"
 $PluginDir   = Join-Path $ClaudeDir "plugins\local\joyspace-writer"
+$ReaderPluginDir = Join-Path $ClaudeDir "plugins\local\joyspace-reader"
 $SettingsFile = Join-Path $ClaudeDir "settings.json"
 
 Write-Host ""
@@ -97,6 +98,38 @@ New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
 "@ | Out-File -FilePath (Join-Path $pluginJsonDir "plugin.json") -Encoding utf8
 Info "plugin.json 已创建"
 
+# ── Step 4b: 创建 Reader Plugin ──
+$readerJsonDir = Join-Path $ReaderPluginDir ".claude-plugin"
+$readerSkillDir = Join-Path $ReaderPluginDir "skills\joyspace-reader"
+New-Item -ItemType Directory -Path $readerJsonDir -Force | Out-Null
+New-Item -ItemType Directory -Path $readerSkillDir -Force | Out-Null
+
+@"
+{
+  "name": "joyspace-reader",
+  "description": "Read and extract structured content from JoySpace documents using Playwright automation",
+  "author": {
+    "name": "joyspace-team"
+  }
+}
+"@ | Out-File -FilePath (Join-Path $readerJsonDir "plugin.json") -Encoding utf8
+
+$readerSkillDst = Join-Path $readerSkillDir "SKILL.md"
+$readerSources = @(
+    (Join-Path $OperatorDir "plugins\joyspace-reader\SKILL.md"),
+    (Join-Path $ClaudeDir "plugins\local\joyspace-reader\skills\joyspace-reader\SKILL.md")
+)
+foreach ($s in $readerSources) {
+    if ((Test-Path $s) -and ($s -ne $readerSkillDst)) {
+        $content = Get-Content $s -Raw
+        $content = $content -replace "/Users/guomu/JoySpace-Operator", ($OperatorDir -replace "\\", "/")
+        $content = $content -replace "/Users/guomu/", ($HomeDir -replace "\\", "/") + "/"
+        $content | Out-File -FilePath $readerSkillDst -Encoding utf8
+        break
+    }
+}
+Info "joyspace-reader plugin 已创建"
+
 # ── Step 5: 复制并替换 SKILL.md 中的路径 ──
 Write-Host ""
 Write-Host "── Step 5: 部署 SKILL.md（自动替换路径）──"
@@ -141,7 +174,8 @@ if (-not (Test-Path $SettingsFile)) {
     @"
 {
   "enabledPlugins": {
-    "joyspace-writer@local": true
+    "joyspace-writer@local": true,
+    "joyspace-reader@local": true
   }
 }
 "@ | Out-File -FilePath $SettingsFile -Encoding utf8
@@ -151,12 +185,18 @@ if (-not (Test-Path $SettingsFile)) {
     if (-not $cfg.enabledPlugins) {
         $cfg | Add-Member -NotePropertyName "enabledPlugins" -NotePropertyValue @{} -Force
     }
-    if ($cfg.enabledPlugins.'joyspace-writer@local' -eq $true) {
-        Info "plugin 已启用（之前已配置）"
-    } else {
-        $cfg.enabledPlugins | Add-Member -NotePropertyName "joyspace-writer@local" -NotePropertyValue $true -Force
+    $changed = $false
+    foreach ($p in @("joyspace-writer@local", "joyspace-reader@local")) {
+        if ($cfg.enabledPlugins.$p -ne $true) {
+            $cfg.enabledPlugins | Add-Member -NotePropertyName $p -NotePropertyValue $true -Force
+            $changed = $true
+        }
+    }
+    if ($changed) {
         $cfg | ConvertTo-Json -Depth 10 | Out-File -FilePath $SettingsFile -Encoding utf8
         Info "settings.json 已更新，plugin 已启用"
+    } else {
+        Info "plugin 已启用（之前已配置）"
     }
 }
 
