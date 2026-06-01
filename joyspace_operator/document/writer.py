@@ -45,30 +45,32 @@ class DocumentWriter:
     #  公开 API
     # ------------------------------------------------------------------ #
 
-    async def set_page_font(self, font_name: str = "京东朗正体") -> bool:
+    async def set_page_font(self, font_name: str = "京东朗正体", force: bool = False) -> bool:
         """检查并设置文档字体，若已是目标字体则跳过。
 
+        force=True 跳过检测，直接打开字体面板设置（用于 create_doc 后首次设置）。
         Returns True if font was set or already correct, False if button not found.
         """
         await self.page.wait_for_timeout(500)  # 等页面头部完全渲染
 
-        # 检查是否已设置（按钮显示完整名或缩写，如「京东朗正体」→「朗正」）
-        font_fragments = [font_name] + [font_name[i:i+2] for i in range(0, len(font_name)-1)]
-        already_js = "(" + " || ".join(
-            f"txt.includes('{f}')" for f in font_fragments
-        ) + ")"
-        already = await self.page.evaluate(f"""() => {{
-            for (const el of document.querySelectorAll('*')) {{
-                const txt = (el.textContent || '').trim();
-                if (!({already_js})) continue;
-                const r = el.getBoundingClientRect();
-                if (r.width > 0 && r.y >= 0 && r.y < 200) return true;
-            }}
-            return false;
-        }}""")
-        if already:
-            log.info("字体已是「%s」，跳过", font_name)
-            return True
+        if not force:
+            # 检查是否已设置（按钮显示完整名或缩写，如「京东朗正体」→「朗正」）
+            font_fragments = [font_name] + [font_name[i:i+2] for i in range(0, len(font_name)-1)]
+            already_js = "(" + " || ".join(
+                f"txt.includes('{f}')" for f in font_fragments
+            ) + ")"
+            already = await self.page.evaluate(f"""() => {{
+                for (const el of document.querySelectorAll('*')) {{
+                    const txt = (el.textContent || '').trim();
+                    if (!({already_js})) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.y >= 0 && r.y < 200) return true;
+                }}
+                return false;
+            }}""")
+            if already:
+                log.info("字体已是「%s」，跳过", font_name)
+                return True
 
         # 找字体按钮：文字为「字体」或当前任意字体名（y < 200px）
         btn = await self.page.evaluate("""() => {
@@ -1339,6 +1341,11 @@ class DocumentWriter:
             await self.page.keyboard.press("Escape")
             await self.page.wait_for_timeout(300)
             await self._force_focus_below_table()
+            await self.page.wait_for_timeout(200)
+
+        # 若光标在列表上下文中，按 Backspace 退出列表格式
+        if await self._is_cursor_in_list():
+            await self.page.keyboard.press("Backspace")
             await self.page.wait_for_timeout(200)
 
         # 用 [data-slate-string] 节点的 textContent 判断空行，过滤零宽字符。
